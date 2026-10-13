@@ -12,7 +12,7 @@ These tests exercise the behavior end-to-end through ``Rubric.grade``.
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import litellm
+import _fakes as fakes
 import pytest
 
 from autorubric import (
@@ -230,7 +230,7 @@ async def test_infra_failure_points_at_genuine_injected_na(mock_llm_config):
     rubric = Rubric([_na_free_ordinal()])
     with patch(
         "autorubric.graders.criterion_grader.LLMClient",
-        return_value=_client_raising(litellm.Timeout("timed out", model="m", llm_provider="p")),
+        return_value=_client_raising(fakes.Timeout("timed out", model="m", llm_provider="p")),
     ):
         grader = CriterionGrader(judge_model_config=mock_llm_config, shuffle_options=False)
         report = await rubric.grade("submission", grader=grader)
@@ -288,7 +288,7 @@ async def test_forced_choice_infra_error_is_genuine_abstain(mock_llm_config):
     rubric = Rubric([_na_free_ordinal()])
     with patch(
         "autorubric.graders.criterion_grader.LLMClient",
-        return_value=_client_raising(litellm.Timeout("timed out", model="m", llm_provider="p")),
+        return_value=_client_raising(fakes.Timeout("timed out", model="m", llm_provider="p")),
     ):
         grader = CriterionGrader(
             judge_model_config=mock_llm_config, shuffle_options=False, auto_na_option=False
@@ -329,7 +329,7 @@ async def test_forced_choice_infra_error_excluded_under_skip(mock_llm_config):
         "autorubric.graders.criterion_grader.LLMClient",
         return_value=_routing_client_mc_raises(
             binary_verdict=CriterionVerdict.MET,
-            exc=litellm.Timeout("timed out", model="m", llm_provider="p"),
+            exc=fakes.Timeout("timed out", model="m", llm_provider="p"),
         ),
     ):
         grader = CriterionGrader(

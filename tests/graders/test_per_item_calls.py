@@ -13,7 +13,7 @@ Nothing here reaches the network. LLM judges are ``RubricLLM`` fakes patched in 
 ``LLMClient``: for ``RubricJudgment`` they build a reply from the ``id="cK"`` attributes of the
 prompt and run it through the real validation (``RubricJudgment.model_validate``); a
 ``ParsedLLM`` fake answers every call with one given parsed reply (a custom response format,
-say). The end-to-end tests keep the real ``LLMClient`` and patch ``litellm.acompletion``.
+say). The end-to-end tests keep the real ``LLMClient`` and patch ``autorubric.llm._acompletion``.
 Decision-model requests go to the recording fake SDK client of the decision-model tests.
 """
 
@@ -30,6 +30,7 @@ from unittest.mock import patch
 
 import pytest
 import typesafe_sdk
+from _fakes import ModelResponse
 
 # The decision-model tests' guards, registered for this module by importing them: no
 # ``httpx2`` transport may send, the ``TYPESAFE_*`` variables are cleared, and the rate-limit
@@ -42,7 +43,6 @@ from decision.conftest import (  # noqa: F401
     _no_network,
     make_response,
 )
-from litellm import ModelResponse
 from pydantic import BaseModel
 from test_error_routing import FAILURES
 
@@ -1564,7 +1564,7 @@ class TestEndToEnd:
             return model_response(content, reasoning="Each criterion, one at a time.")
 
         reports = []
-        with patch("litellm.acompletion", side_effect=fake_acompletion):
+        with patch("autorubric.llm._acompletion", side_effect=fake_acompletion):
             for _ in range(2):
                 calls.clear()
                 grader = CriterionGrader(
@@ -1650,7 +1650,7 @@ class TestEndToEnd:
             return model_response(content, reasoning=reasoning)
 
         reports = []
-        with patch("litellm.acompletion", side_effect=fake_acompletion):
+        with patch("autorubric.llm._acompletion", side_effect=fake_acompletion):
             for _ in range(2):
                 grader = CriterionGrader(
                     judge_model_config=real_llm(tmp_path), llm_calls="per_item"

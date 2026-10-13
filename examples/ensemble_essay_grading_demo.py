@@ -22,7 +22,6 @@ import os
 import sys
 from pathlib import Path
 
-import litellm
 from dotenv import load_dotenv
 
 from autorubric import (
@@ -36,7 +35,6 @@ from autorubric.graders import CriterionGrader, JudgeSpec
 
 load_dotenv()
 
-litellm.suppress_debug_info = True
 
 # Path to the shared dataset
 DATASET_PATH = Path(__file__).parent / "data" / "essay_grading_dataset.json"

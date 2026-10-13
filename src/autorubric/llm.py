@@ -1,8 +1,18 @@
-"""LLM calling infrastructure with multi-provider support.
+"""LLM calling infrastructure for Anthropic's Claude models.
 
-This module provides a unified interface to 100+ LLM providers via LiteLLM,
-with support for structured outputs, automatic retries, response caching,
-and provider-specific features like extended thinking and prompt caching.
+This fork calls the Anthropic API directly (the ``anthropic`` SDK) instead of routing through
+LiteLLM, with structured outputs, automatic retries, response caching, extended thinking and
+prompt caching. It authenticates one of two ways (``LLMConfig.auth``, or ``AUTORUBRIC_AUTH``):
+
+- ``"oauth"`` (the default): a Claude subscription (Pro/Max), with the OAuth token the
+  ``claude`` CLI uses: ``CLAUDE_TOKEN_<NAME>`` when ``CLAUDE_ACCOUNT=<name>`` is set, else
+  ``CLAUDE_CODE_OAUTH_TOKEN`` (from ``claude setup-token``), else the token the CLI keeps in the
+  macOS Keychain. ``ANTHROPIC_API_KEY`` is never sent in this mode, so a request cannot fall
+  back to API billing.
+- ``"api_key"``: the paid API, with ``LLMConfig.api_key`` or ``ANTHROPIC_API_KEY``.
+
+Model ids are Anthropic's (``claude-opus-5-5``); the LiteLLM-style ``anthropic/`` prefix is
+accepted and dropped. Other providers are not supported.
 """
 
 from __future__ import annotations
@@ -10,15 +20,18 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import re
+import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from pathlib import Path, PurePath
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import diskcache
-import litellm
-import openai
 import yaml
 from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel, ValidationError
@@ -35,6 +48,8 @@ from tenacity import (
 from autorubric.rate_limit import RateLimitPool
 
 if TYPE_CHECKING:
+    import anthropic
+
     from autorubric.types import TokenUsage
 
 # Load the nearest .env at or above the working directory, in scripts and notebooks alike;
@@ -65,12 +80,10 @@ ErrorCategory = Literal["infrastructure", "parse", "unknown"]
 def classify_grading_error(exc: BaseException) -> ErrorCategory:
     """Classify an exception raised while grading a criterion.
 
-    Reuses the underlying OpenAI exception taxonomy that LiteLLM builds on: every
-    transient API failure (``Timeout``, ``APIConnectionError``, ``RateLimitError``,
-    ``ServiceUnavailableError``, ``InternalServerError``, status errors, etc.) subclasses
-    ``openai.APIError`` (including ``litellm.APIError`` itself), while parse/validation
-    failures (``json.JSONDecodeError`` -> ``ValueError``, ``pydantic.ValidationError``)
-    do not.
+    Reuses the Anthropic SDK's exception taxonomy: every API failure (``APITimeoutError``,
+    ``APIConnectionError``, ``RateLimitError``, ``OverloadedError``, ``InternalServerError``,
+    status errors, etc.) subclasses ``anthropic.APIError``, while parse/validation failures
+    (``json.JSONDecodeError`` -> ``ValueError``, ``pydantic.ValidationError``) do not.
 
     Decision-model failures raised by the optional TypeSafe SDK (``typesafe-sdk``) are
     routed by the SDK's own exception types, ahead of the ``ValueError`` rule:
@@ -90,7 +103,10 @@ def classify_grading_error(exc: BaseException) -> ErrorCategory:
         ``"infrastructure"`` for API/network errors, ``"parse"`` for JSON/validation
         errors, and ``"unknown"`` for anything else.
     """
-    if isinstance(exc, openai.APIError):
+    # The SDK is imported only when a judge calls the API (it brings its own HTTP stack), so
+    # an Anthropic exception can exist only once it is in sys.modules.
+    sdk = sys.modules.get("anthropic")
+    if sdk is not None and isinstance(exc, sdk.APIError):
         return "infrastructure"
     typesafe_category = _classify_typesafe_error(exc)
     if typesafe_category is not None:
@@ -340,25 +356,21 @@ def _extract_usage_from_response(response: Any) -> TokenUsage:
     )
 
 
+# USD per million tokens (input, output) for API-key billing; cache reads cost a tenth of
+# input and cache writes 1.25x. A model not listed has no cost, and nor does any call on a
+# subscription (auth "oauth"), which is not billed per token.
+API_PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-opus-4-5": (5.0, 25.0),
+    "claude-opus-4-1": (15.0, 75.0),
+    "claude-sonnet-4-5": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
+
+
 def _calculate_completion_cost(response: Any) -> float | None:
-    """Calculate completion cost using LiteLLM's completion_cost function.
-
-    Uses LiteLLM's built-in cost calculation which has pricing data for
-    all supported providers.
-
-    Args:
-        response: The LiteLLM response object
-
-    Returns:
-        Cost in USD, or None if cost calculation fails.
-    """
-    try:
-        # LiteLLM's completion_cost accepts the response object directly
-        cost = litellm.completion_cost(completion_response=response)
-        return float(cost) if cost is not None else None
-    except Exception as e:
-        logger.debug(f"Could not calculate completion cost: {e}")
-        return None
+    """Cost in USD of one call, as ``_acompletion`` left it on the response (``None`` when
+    unknown or not billed per token)."""
+    return getattr(response, "cost", None)
 
 
 _debug_console = Console()
@@ -400,12 +412,10 @@ def _provider_response_format(response_format: type[BaseModel]) -> type[BaseMode
     if "reasoning" not in getattr(response_format, "model_fields", {}):
         return response_format
     try:
-        from litellm.utils import type_to_response_format_param
-
-        param = type_to_response_format_param(response_format)
+        param = _json_schema_param(response_format)
     except Exception:
         param = None
-    # Unknown litellm shape — keep current behaviour (pass the model through).
+    # Unexpected schema shape: keep current behaviour (pass the model through).
     if not isinstance(param, dict):
         return response_format
     schema = param.get("json_schema", {}).get("schema")
@@ -416,6 +426,51 @@ def _provider_response_format(response_format: type[BaseModel]) -> type[BaseMode
     if isinstance(required, list):
         schema["required"] = [key for key in required if key != "reasoning"]
     return param
+
+
+def _json_schema_param(model: type[BaseModel]) -> dict[str, Any]:
+    """A Pydantic model as a strict ``json_schema`` response format: every object forbids
+    extra properties and requires all of its own, and ``default: null`` is dropped (what
+    LiteLLM's ``type_to_response_format_param`` produced, via the OpenAI SDK's strict-schema
+    pass, so cache keys and prompts are unchanged by the move off LiteLLM)."""
+    schema = model.model_json_schema()
+    _ensure_strict(schema, schema)
+    name = re.sub(r"[^a-zA-Z0-9_-]", "_", model.__name__) or "response"
+    return {"type": "json_schema", "json_schema": {"schema": schema, "name": name, "strict": True}}
+
+
+def _ensure_strict(node: Any, root: dict[str, Any]) -> Any:
+    """Make a JSON schema strict in place (see ``_json_schema_param``)."""
+    if not isinstance(node, dict):
+        return node
+    for key in ("$defs", "definitions"):
+        for sub in (node.get(key) or {}).values():
+            _ensure_strict(sub, root)
+    if node.get("type") == "object" and "additionalProperties" not in node:
+        node["additionalProperties"] = False
+    properties = node.get("properties")
+    if isinstance(properties, dict):
+        node["required"] = list(properties)
+        for sub in properties.values():
+            _ensure_strict(sub, root)
+    if isinstance(node.get("items"), dict):
+        _ensure_strict(node["items"], root)
+    for key in ("anyOf", "allOf"):
+        for sub in node.get(key) or []:
+            _ensure_strict(sub, root)
+    if len(node.get("allOf") or []) == 1:
+        node.update(_ensure_strict(node.pop("allOf")[0], root))
+    if "default" in node and node["default"] is None:
+        node.pop("default")
+    ref = node.get("$ref")
+    if ref and len(node) > 1:  # a $ref with siblings is inlined, as strict mode requires
+        target: Any = root
+        for part in ref.removeprefix("#/").split("/"):
+            target = target[part]
+        node.pop("$ref")
+        node.update({**target, **node})
+        return _ensure_strict(node, root)
+    return node
 
 
 class _LLMConfigDumper(yaml.SafeDumper):
@@ -440,10 +495,11 @@ class LLMConfig:
     """Configuration for LLM calls.
 
     Attributes:
-        model: Model identifier in LiteLLM format (e.g., "openai/gpt-5.2",
-               "anthropic/claude-sonnet-4-5-20250929", "gemini/gemini-3-pro-preview",
-               "ollama/qwen3:14b"). REQUIRED - no default.
-               See LiteLLM docs for full list of supported models.
+        model: An Anthropic model id (e.g., "claude-opus-5-5", "claude-sonnet-4-5"); the
+               LiteLLM-style "anthropic/" prefix is accepted. REQUIRED - no default.
+        auth: How to authenticate: "oauth" (a Claude subscription's OAuth token, the
+            default) or "api_key" (the paid API). None (default) reads ``AUTORUBRIC_AUTH``,
+            else uses "oauth". See the module docstring for where each credential is read.
         temperature: Sampling temperature. None (default) omits it from the request so
             the provider's own default applies; this is recommended for reasoning models
             such as GPT-5.x and for Gemini 3, and required for Anthropic extended
@@ -493,14 +549,14 @@ class LLMConfig:
 
     Examples:
         # Basic usage without thinking (provider-default temperature)
-        config = LLMConfig(model="openai/gpt-5.2")
+        config = LLMConfig(model="claude-opus-5-5")
 
         # Explicit temperature
-        config = LLMConfig(model="openai/gpt-4.1-mini", temperature=0.0)  # explicit; sent as-is
+        config = LLMConfig(model="claude-haiku-4-5", temperature=0.0)  # explicit; sent as-is
 
         # Enable thinking with a level
         config = LLMConfig(model="anthropic/claude-sonnet-4-5-20250929", thinking="high")
-        config = LLMConfig(model="openai/responses/gpt-5-mini", thinking=ThinkingLevel.HIGH)
+        config = LLMConfig(model="claude-opus-5-5", thinking=ThinkingLevel.HIGH)
 
         # Enable thinking with explicit token budget
         config = LLMConfig(model="anthropic/claude-opus-4-5-20251101", thinking=32000)
@@ -513,6 +569,7 @@ class LLMConfig:
     """
 
     model: str  # REQUIRED - no default, must always be specified
+    auth: Literal["oauth", "api_key"] | None = None  # None: AUTORUBRIC_AUTH, else "oauth"
     temperature: float | None = None  # None = provider default (not sent)
     max_tokens: int | None = None
     top_p: float | None = None
@@ -555,7 +612,7 @@ class LLMConfig:
             ValueError: If required fields are missing or invalid.
 
         Example YAML file (llm_config.yaml):
-            model: openai/gpt-5.2
+            model: claude-opus-5-5
             # temperature omitted: the provider's default applies
             max_tokens: 1024
             cache_enabled: true
@@ -641,6 +698,206 @@ def _open_response_cache(cache_dir: str | Path) -> diskcache.Cache:
     return diskcache.Cache(directory=str(path))
 
 
+# ============================================================================
+# The Anthropic transport (in place of litellm.acompletion)
+# ============================================================================
+
+OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
+# A request on a subscription's OAuth token is accepted only when its system prompt opens
+# with the Claude Code identity line.
+CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+DEFAULT_MAX_TOKENS = 16000
+# Models that take only adaptive thinking ({"type": "adaptive"} with an effort level): a
+# thinking budget_tokens is rejected (or deprecated) on these.
+_ADAPTIVE_ONLY = re.compile(r"claude-(opus|sonnet|haiku|fable)-(5|4-[6-9])")
+
+
+def resolve_auth(auth: str | None) -> str:
+    """The auth mode to use: ``auth``, else ``AUTORUBRIC_AUTH``, else ``"oauth"``."""
+    mode = auth or os.environ.get("AUTORUBRIC_AUTH") or "oauth"
+    if mode not in ("oauth", "api_key"):
+        raise ValueError(f"auth must be 'oauth' or 'api_key', not {mode!r}")
+    return mode
+
+
+def oauth_token() -> str:
+    """A Claude subscription's OAuth token: ``CLAUDE_TOKEN_<NAME>`` when ``CLAUDE_ACCOUNT`` names
+    an account, else ``CLAUDE_CODE_OAUTH_TOKEN``, else the token the ``claude`` CLI keeps in the
+    macOS Keychain (which must not have expired; running ``claude`` once refreshes it)."""
+    if name := os.environ.get("CLAUDE_ACCOUNT"):
+        key = f"CLAUDE_TOKEN_{name.upper()}"
+        if token := os.environ.get(key):
+            return token
+        raise RuntimeError(f"CLAUDE_ACCOUNT={name} but {key} is not set")
+    if token := os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return token
+    try:
+        raw = subprocess.check_output(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        creds = json.loads(raw)["claudeAiOauth"]
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError):
+        creds = None
+    if creds is None:
+        raise RuntimeError(
+            "No Claude subscription token: set CLAUDE_CODE_OAUTH_TOKEN "
+            "(from `claude setup-token`), or CLAUDE_ACCOUNT and CLAUDE_TOKEN_<NAME>, "
+            "or log in with `claude`; "
+            "or use auth='api_key' with ANTHROPIC_API_KEY"
+        )
+    if creds["expiresAt"] / 1000 < time.time() + 60:
+        raise RuntimeError(
+            "The Claude CLI's Keychain token has expired; run `claude` once to refresh it"
+        )
+    return creds["accessToken"]
+
+
+def _anthropic_client(
+    auth: str, api_key: str | None, api_base: str | None, timeout: float
+) -> anthropic.AsyncAnthropic:
+    """An async client for one call. Retries are left to the caller (tenacity), so the SDK
+    makes none of its own."""
+    import anthropic
+
+    if auth == "oauth":
+        client = anthropic.AsyncAnthropic(
+            auth_token=oauth_token(),
+            base_url=api_base,
+            timeout=timeout,
+            max_retries=0,
+            default_headers={"anthropic-beta": OAUTH_BETAS},
+        )
+        client.api_key = None  # the SDK reads ANTHROPIC_API_KEY on its own; never send it here
+        return client
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise RuntimeError("auth='api_key' needs LLMConfig.api_key or ANTHROPIC_API_KEY")
+    return anthropic.AsyncAnthropic(api_key=key, base_url=api_base, timeout=timeout, max_retries=0)
+
+
+def anthropic_model(model: str) -> str:
+    """An Anthropic model id from ``model``, dropping a LiteLLM-style ``anthropic/`` prefix."""
+    name = model.removeprefix("anthropic/")
+    if "/" in name or not name.startswith("claude"):
+        raise ValueError(f"Only Anthropic models are supported in this fork, not {model!r}")
+    return name
+
+
+def _thinking_params(
+    model: str, params: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The request's ``thinking`` and effort level from a ``thinking`` budget or a
+    ``reasoning_effort`` level. Models that take only adaptive thinking get it with the
+    nearest effort level; older models get an explicit budget."""
+    budget = (params.get("thinking") or {}).get("budget_tokens")
+    level = params.get("reasoning_effort")
+    if budget is None and level is None:
+        return None, None
+    if level == "none":
+        return None, None
+    if _ADAPTIVE_ONLY.search(model):
+        if level is None:
+            level = "low" if budget <= 2048 else "medium" if budget <= 8192 else "high"
+        return {"type": "adaptive"}, level
+    if budget is None:
+        budget = THINKING_LEVEL_BUDGETS.get(level, 2048)
+    return {"type": "enabled", "budget_tokens": budget}, None
+
+
+def _system_blocks(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return [dict(block) for block in content]
+    return [{"type": "text", "text": content}]
+
+
+async def _acompletion(**params: Any) -> Any:
+    """One Messages API call from the request ``LLMClient.generate`` builds (OpenAI-shaped:
+    system and user messages, ``response_format``, ``thinking`` or ``reasoning_effort``),
+    returning an OpenAI-shaped response: ``choices[0].message.content`` (and
+    ``.reasoning_content``, the thinking), ``usage`` with ``prompt_tokens`` (all input,
+    cached included), ``completion_tokens``, the cache counts, and ``cost`` (USD, or None)."""
+    params = dict(params)
+    model = anthropic_model(params.pop("model"))
+    auth = resolve_auth(params.pop("auth", None))
+    timeout = params.pop("timeout", 60.0)
+    messages = params.pop("messages")
+    system: list[dict[str, Any]] = []
+    turns: list[dict[str, Any]] = []
+    for m in messages:
+        if m["role"] == "system":
+            system += _system_blocks(m["content"])
+        else:
+            turns.append({"role": m["role"], "content": m["content"]})
+    if auth == "oauth":
+        system = [{"type": "text", "text": CLAUDE_CODE_IDENTITY}, *system]
+    thinking, effort = _thinking_params(model, params)
+    params.pop("thinking", None)
+    params.pop("reasoning_effort", None)
+    output_config: dict[str, Any] = {"effort": effort} if effort else {}
+    response_format = params.pop("response_format", None)
+    if response_format is not None:
+        if isinstance(response_format, dict):
+            schema = response_format["json_schema"]["schema"]
+        else:
+            schema = _json_schema_param(response_format)["json_schema"]["schema"]
+        output_config["format"] = {"type": "json_schema", "schema": schema}
+    api_key = params.pop("api_key", None)
+    api_base = params.pop("api_base", None)
+    extra_headers = params.pop("extra_headers", None)
+    params.pop("seed", None)  # not an Anthropic parameter
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "max_tokens": params.pop("max_tokens", None) or DEFAULT_MAX_TOKENS,
+        "system": system,
+        "messages": turns,
+    }
+    if thinking:
+        kwargs["thinking"] = thinking
+    if output_config:
+        kwargs["output_config"] = output_config
+    if extra_headers:
+        kwargs["extra_headers"] = extra_headers
+    if params:  # temperature, top_p and any extra_params go as they are
+        kwargs["extra_body"] = params
+    client = _anthropic_client(auth, api_key, api_base, timeout)
+    async with client:
+        async with client.messages.stream(**kwargs) as stream:
+            msg = await stream.get_final_message()
+    text = "".join(block.text for block in msg.content if block.type == "text")
+    trace = "\n".join(
+        block.thinking
+        for block in msg.content
+        if block.type == "thinking" and getattr(block, "thinking", None)
+    )
+    u = msg.usage
+    cache_write = getattr(u, "cache_creation_input_tokens", 0) or 0
+    cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
+    prompt_tokens = (u.input_tokens or 0) + cache_write + cache_read
+    cost = None
+    if auth == "api_key" and (price := API_PRICES_PER_MTOK.get(re.sub(r"-\d{8}$", "", model))):
+        cost = ((u.input_tokens or 0) + 1.25 * cache_write + 0.1 * cache_read) * price[0] / 1e6 + (
+            u.output_tokens or 0
+        ) * price[1] / 1e6
+    message = SimpleNamespace(
+        content=text, reasoning_content=trace or None, thinking_blocks=None, thinking=None
+    )
+    return SimpleNamespace(
+        model=msg.model,
+        choices=[SimpleNamespace(message=message, finish_reason=msg.stop_reason, index=0)],
+        usage=SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=u.output_tokens or 0,
+            total_tokens=prompt_tokens + (u.output_tokens or 0),
+            cache_creation_input_tokens=cache_write,
+            cache_read_input_tokens=cache_read,
+        ),
+        cost=cost,
+    )
+
+
 class LLMClient:
     """Unified LLM client with retries, caching, and structured output support.
 
@@ -723,13 +980,16 @@ class LLMClient:
 
     def _get_retry_decorator(self) -> Any:
         """Build tenacity retry decorator from config."""
+        import anthropic
+
         return retry(
             retry=retry_if_exception_type(
                 (
-                    litellm.RateLimitError,
-                    litellm.ServiceUnavailableError,
-                    litellm.APIConnectionError,
-                    litellm.Timeout,
+                    anthropic.RateLimitError,
+                    anthropic.OverloadedError,
+                    anthropic.ServiceUnavailableError,
+                    anthropic.InternalServerError,
+                    anthropic.APIConnectionError,  # APITimeoutError is one
                 )
             ),
             stop=stop_after_attempt(self.config.max_retries),
@@ -783,7 +1043,7 @@ class LLMClient:
                 field, it will be populated with the model's thinking trace.
 
         Raises:
-            litellm.APIError: If all retries fail
+            anthropic.APIError: If all retries fail
             pydantic.ValidationError: If response doesn't match schema
         """
         # Determine caching behavior for this request
@@ -853,6 +1113,8 @@ class LLMClient:
             params["max_tokens"] = kwargs.get("max_tokens", self.config.max_tokens)
         if self.config.top_p:
             params["top_p"] = kwargs.get("top_p", self.config.top_p)
+        if self.config.auth:
+            params["auth"] = self.config.auth
         if self.config.api_key:
             params["api_key"] = self.config.api_key
         if self.config.api_base:
@@ -904,13 +1166,12 @@ class LLMClient:
         @retry_decorator
         async def _call() -> str:
             nonlocal thinking_content, raw_response
-            response = await litellm.acompletion(**params)
+            response = await _acompletion(**params)
             raw_response = response
 
             message = response.choices[0].message
 
-            # Extract thinking/reasoning content (standardized across providers)
-            # LiteLLM provides unified `reasoning_content` field
+            # Extract thinking/reasoning content (_acompletion puts it on reasoning_content)
             thinking_content = _extract_thinking_content(message)
 
             return message.content  # type: ignore[return-value]
@@ -932,8 +1193,7 @@ class LLMClient:
         # Parse structured output if requested
         parsed_response: T | None = None
         if response_format is not None:
-            # LiteLLM returns JSON string when response_format is set
-            # Parse it into the Pydantic model
+            # The reply is a JSON string when response_format is set; parse it into the model
             data = json.loads(response_content)
 
             # Inject thinking content into the reasoning field if available
@@ -1042,7 +1302,7 @@ async def generate(
         response = await generate(
             "You are a helpful assistant.",
             "What is 2+2?",
-            model="openai/gpt-5.2-mini"
+            model="claude-haiku-4-5"
         )
 
         # Structured output
@@ -1055,7 +1315,7 @@ async def generate(
         answer = await generate(
             "You are a math tutor.",
             "What is 2+2?",
-            model="openai/gpt-5.2-mini",
+            model="claude-haiku-4-5",
             response_format=MathAnswer
         )
         print(answer.result)  # 4

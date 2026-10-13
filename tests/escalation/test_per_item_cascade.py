@@ -26,7 +26,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, cast
 
-import litellm
+import _fakes as fakes
 import pytest
 
 from autorubric import (
@@ -103,7 +103,7 @@ ESCALATED_GLOBALLY = [
 
 # A failure of each category, as ``classify_grading_error`` routes it.
 FAILURES = {
-    "infrastructure": lambda: litellm.Timeout("timed out", model="m", llm_provider="p"),
+    "infrastructure": lambda: fakes.Timeout("timed out", model="m", llm_provider="p"),
     "parse": lambda: ValueError("bad json"),
     "unknown": lambda: RuntimeError("boom"),
 }

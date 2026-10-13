@@ -2,9 +2,9 @@
 
 from unittest.mock import MagicMock, patch
 
-import litellm
+import _fakes as fakes
 import pytest
-from litellm import ModelResponse
+from _fakes import ModelResponse
 
 from autorubric import (
     Criterion,
@@ -598,7 +598,7 @@ def _failure(category: str, model: str) -> BaseException | None:
     """An exception a judge call fails with in ``category``; None for a parse failure, which
     is a response that does not parse."""
     if category == "infrastructure":
-        return litellm.APIConnectionError(
+        return fakes.APIConnectionError(
             message="Connection error.", llm_provider="openai", model=model
         )
     if category == "unknown":
@@ -635,7 +635,7 @@ async def test_verdicts_standing_in_for_failed_judge_calls_are_not_labels(mixed_
         return _llm_response("not json")
 
     grader = _llm_grader()
-    with patch("litellm.acompletion", side_effect=acompletion):
+    with patch("autorubric.llm._acompletion", side_effect=acompletion):
         report = await mixed_rubric.grade(
             to_grade="Response 1", grader=grader, query="Evaluate the response"
         )
@@ -655,7 +655,7 @@ async def test_an_item_with_one_failed_criterion_is_left_out(mixed_rubric):
             raise RuntimeError("boom")
         return _llm_response(MET_JSON)
 
-    with patch("litellm.acompletion", side_effect=acompletion):
+    with patch("autorubric.llm._acompletion", side_effect=acompletion):
         labeled = await fill_ground_truth(
             _one_item(mixed_rubric), _llm_grader(), show_progress=False
         )
@@ -670,7 +670,7 @@ async def test_a_panel_with_a_genuine_vote_still_labels_the_item(binary_rubric):
 
     async def acompletion(**params):
         if params["model"].endswith("gpt-4.1"):  # the judge that is down
-            raise litellm.APIConnectionError(
+            raise fakes.APIConnectionError(
                 message="Connection error.", llm_provider="openai", model=params["model"]
             )
         return _llm_response(MET_JSON)
@@ -681,7 +681,7 @@ async def test_a_panel_with_a_genuine_vote_still_labels_the_item(binary_rubric):
             JudgeSpec(LLMConfig(model="openai/gpt-4.1-mini", max_retries=1), "up"),
         ]
     )
-    with patch("litellm.acompletion", side_effect=acompletion):
+    with patch("autorubric.llm._acompletion", side_effect=acompletion):
         labeled = await fill_ground_truth(_one_item(binary_rubric), grader, show_progress=False)
 
     assert [item.ground_truth for item in labeled] == [[CriterionVerdict.MET, CriterionVerdict.MET]]

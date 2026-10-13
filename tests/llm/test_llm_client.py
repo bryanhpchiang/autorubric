@@ -221,8 +221,8 @@ class TestLLMClientGenerate:
     """Tests for LLMClient generate method using mocks."""
 
     @pytest.mark.asyncio
-    async def test_generate_calls_litellm(self):
-        """generate makes a call to litellm.acompletion."""
+    async def test_generate_calls_the_api(self):
+        """generate makes a call through _acompletion."""
         config = LLMConfig(model="openai/gpt-5.2")
         client = LLMClient(config)
 
@@ -236,7 +236,7 @@ class TestLLMClientGenerate:
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
 
-        with patch("autorubric.llm.litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+        with patch("autorubric.llm._acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = mock_response
 
             result = await client.generate(
@@ -265,9 +265,7 @@ class TestLLMClientGenerate:
             cache_key = client._cache_key("openai/gpt-5.2", "System", "User", None)
             client._cache.set(cache_key, "cached response")
 
-            with patch(
-                "autorubric.llm.litellm.acompletion", new_callable=AsyncMock
-            ) as mock_completion:
+            with patch("autorubric.llm._acompletion", new_callable=AsyncMock) as mock_completion:
                 result = await client.generate(
                     system_prompt="System",
                     user_prompt="User",
@@ -294,7 +292,7 @@ class TestLLMClientGenerate:
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
 
-        with patch("autorubric.llm.litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+        with patch("autorubric.llm._acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = mock_response
 
             result = await client.generate(
@@ -347,7 +345,7 @@ class TestLLMClientGenerate:
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
 
-        with patch("autorubric.llm.litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+        with patch("autorubric.llm._acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = mock_response
 
             await client.generate(
@@ -379,9 +377,7 @@ class TestLLMClientGenerate:
             mock_response = MagicMock()
             mock_response.choices = [mock_choice]
 
-            with patch(
-                "autorubric.llm.litellm.acompletion", new_callable=AsyncMock
-            ) as mock_completion:
+            with patch("autorubric.llm._acompletion", new_callable=AsyncMock) as mock_completion:
                 mock_completion.return_value = mock_response
 
                 # Force cache usage
@@ -401,7 +397,7 @@ class TestLLMClientGenerate:
 
 
 def _text_response(content: str = "Response") -> MagicMock:
-    """Build a minimal litellm-style completion response carrying ``content``."""
+    """A minimal OpenAI-shaped response (what _acompletion returns) carrying ``content``."""
     mock_message = MagicMock()
     mock_message.content = content
     mock_message.reasoning_content = None
@@ -420,7 +416,7 @@ class TestLLMClientTemperature:
     @staticmethod
     async def _sent_kwargs(config: LLMConfig, **generate_kwargs) -> dict:
         client = LLMClient(config)
-        with patch("autorubric.llm.litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+        with patch("autorubric.llm._acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = _text_response()
             await client.generate(system_prompt="System", user_prompt="User", **generate_kwargs)
         mock_completion.assert_called_once()
@@ -514,9 +510,7 @@ class TestLLMClientTemperature:
         )
         client = LLMClient(config)
         try:
-            with patch(
-                "autorubric.llm.litellm.acompletion", new_callable=AsyncMock
-            ) as mock_completion:
+            with patch("autorubric.llm._acompletion", new_callable=AsyncMock) as mock_completion:
                 mock_completion.side_effect = [
                     _text_response("at config temperature"),
                     _text_response("at override temperature"),
@@ -549,9 +543,7 @@ class TestLLMClientTemperature:
         config = LLMConfig(model="openai/gpt-5.2", cache_enabled=True, cache_dir=tmp_path)
         client = LLMClient(config)
         try:
-            with patch(
-                "autorubric.llm.litellm.acompletion", new_callable=AsyncMock
-            ) as mock_completion:
+            with patch("autorubric.llm._acompletion", new_callable=AsyncMock) as mock_completion:
                 mock_completion.return_value = _text_response("ok")
                 result = await client.generate(
                     system_prompt="System", user_prompt="User", model="openai/gpt-4.1-mini"
@@ -603,7 +595,7 @@ class TestProviderResponseFormat:
         mock_response.choices = [mock_choice]
 
         client = LLMClient(LLMConfig(model="groq/llama-3.3-70b-versatile"))
-        with patch("autorubric.llm.litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+        with patch("autorubric.llm._acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = mock_response
             result = await client.generate(
                 system_prompt="judge this",
@@ -770,7 +762,7 @@ class TestRubricJudgmentResponseFormat:
         mock_response.choices = [mock_choice]
 
         client = LLMClient(LLMConfig(model="anthropic/claude-sonnet-5"))
-        with patch("autorubric.llm.litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+        with patch("autorubric.llm._acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = mock_response
             result = await client.generate(
                 system_prompt="judge every criterion",
@@ -816,7 +808,7 @@ class TestNonObjectReplies:
         mock_response.choices = [mock_choice]
 
         client = LLMClient(LLMConfig(model="anthropic/claude-sonnet-5"))
-        with patch("autorubric.llm.litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+        with patch("autorubric.llm._acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = mock_response
             with pytest.raises(ValidationError) as caught:
                 await client.generate(
@@ -872,7 +864,7 @@ class TestAnthropicPromptCaching:
 
     @staticmethod
     async def _sent_params(config: LLMConfig) -> dict:
-        from litellm import ModelResponse
+        from _fakes import ModelResponse
 
         sent: dict = {}
 
@@ -890,7 +882,7 @@ class TestAnthropicPromptCaching:
                 usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
             )
 
-        with patch("litellm.acompletion", side_effect=fake_acompletion):
+        with patch("autorubric.llm._acompletion", side_effect=fake_acompletion):
             await LLMClient(config).generate("System", "User")
         return sent
 

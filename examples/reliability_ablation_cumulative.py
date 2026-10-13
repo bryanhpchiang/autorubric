@@ -23,7 +23,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import litellm
 from dotenv import load_dotenv
 
 from autorubric import FewShotConfig, LLMConfig, evaluate
@@ -31,7 +30,6 @@ from autorubric.dataset import RubricDataset
 from autorubric.graders import CriterionGrader, JudgeSpec
 
 load_dotenv()
-litellm.suppress_debug_info = True
 
 DATASET_PATH = Path(__file__).parent / "data" / "hashemi_etal_2024_dataset.json"
 SEED = 42

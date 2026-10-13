@@ -337,6 +337,7 @@ class TestLLMConfigToYaml:
         """Every LLMConfig field survives to_yaml/from_yaml when set to a non-default value."""
         original = LLMConfig(
             model="anthropic/claude-sonnet-4-5-20250929",
+            auth="api_key",
             temperature=0.7,
             max_tokens=1024,
             top_p=0.9,

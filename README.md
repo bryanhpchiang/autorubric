@@ -16,6 +16,18 @@
 
 # AutoRubric
 
+> **This fork** ([bryanhpchiang/autorubric](https://github.com/bryanhpchiang/autorubric)) calls Claude through the
+> Anthropic SDK instead of LiteLLM, so judges can run on a Claude subscription (Pro/Max) as well as the paid API.
+>
+> - **Auth.** `LLMConfig(auth="oauth")` (the default) uses a subscription's OAuth token: `CLAUDE_TOKEN_<NAME>`
+>   when `CLAUDE_ACCOUNT=<name>` is set, else `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), else the token
+>   the `claude` CLI keeps in the macOS Keychain. `ANTHROPIC_API_KEY` is never sent in that mode.
+>   `LLMConfig(auth="api_key")`, or `AUTORUBRIC_AUTH=api_key`, uses the paid API with `ANTHROPIC_API_KEY`.
+> - **Models.** Anthropic models only (`claude-opus-5-5`; the `anthropic/` prefix is accepted). Thinking levels map to
+>   adaptive thinking with an effort level on current models and to a token budget on older ones.
+> - **Install.** `uv sync`; tests with `uv run pytest`. `scripts/parity/` still compares against LiteLLM and needs it
+>   installed separately.
+
 A Python library for evaluating text outputs against weighted criteria using AI judges such as LLMs and decision models.
 
 ```bibtex

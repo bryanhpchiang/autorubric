@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import anthropic
 import httpx
-import openai
 import pytest
 
 from autorubric import LLMConfig, evaluate
@@ -436,7 +436,7 @@ def _fake_generate(failing_models: set[str], fail_all: bool = False):
     async def generate(self, system_prompt, user_prompt, response_format=None, **kwargs):
         submission = user_prompt.split("<submission>")[-1].split("</submission>")[0]
         if fail_all or self.config.model in failing_models or "FAIL" in submission:
-            raise openai.APIConnectionError(request=httpx.Request("POST", "https://llm.test"))
+            raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://llm.test"))
         fruit = "apples" if "Mentions apples" in user_prompt else "pears"
         status = "MET" if fruit in submission else "UNMET"
         return GenerateResult(

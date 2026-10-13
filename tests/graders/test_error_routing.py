@@ -15,7 +15,7 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import litellm
+import _fakes as fakes
 import pytest
 from pydantic import BaseModel, ValidationError
 
@@ -108,16 +108,16 @@ class TestClassifyGradingError:
     @pytest.mark.parametrize(
         "exc, expected",
         [
-            (litellm.Timeout("timed out", model="m", llm_provider="p"), "infrastructure"),
-            (litellm.RateLimitError("rate limited", model="m", llm_provider="p"), "infrastructure"),
+            (fakes.Timeout("timed out", model="m", llm_provider="p"), "infrastructure"),
+            (fakes.RateLimitError("rate limited", model="m", llm_provider="p"), "infrastructure"),
             (_json_decode_error(), "parse"),  # json.JSONDecodeError subclasses ValueError
             (_validation_error(), "parse"),
             (ValueError("bad value"), "parse"),
             (RuntimeError("boom"), "unknown"),
         ],
         ids=[
-            "litellm_timeout",
-            "litellm_rate_limit",
+            "api_timeout",
+            "api_rate_limit",
             "json_decode_error",
             "pydantic_validation_error",
             "value_error",
@@ -150,7 +150,7 @@ async def test_binary_infrastructure_failure_cannot_assess_and_no_penalty(mock_l
 
     async def mock_generate(system_prompt, user_prompt, **kwargs) -> Any:
         if "Criterion B" in user_prompt:
-            raise litellm.Timeout("timed out", model="m", llm_provider="p")
+            raise fakes.Timeout("timed out", model="m", llm_provider="p")
         return _ok_binary_result(CriterionVerdict.MET)
 
     client = MagicMock()
@@ -285,7 +285,7 @@ async def test_ensemble_mixed_one_failure_keeps_successful_verdict():
     rubric = Rubric([Criterion(weight=1.0, requirement="Criterion A")])
 
     # Build distinct clients keyed by the judge's model so we can route per-judge.
-    client_a = _client_raising(litellm.Timeout("timed out", model="m", llm_provider="p"))
+    client_a = _client_raising(fakes.Timeout("timed out", model="m", llm_provider="p"))
     client_b = MagicMock()
     client_b.generate = AsyncMock(return_value=_ok_binary_result(CriterionVerdict.MET))
 
@@ -319,8 +319,8 @@ async def test_ensemble_all_judges_fail_cannot_assess_and_flagged():
     """Every judge fails (infra) -> CANNOT_ASSESS and ensemble flagged as error."""
     rubric = Rubric([Criterion(weight=1.0, requirement="Criterion A")])
 
-    client_a = _client_raising(litellm.Timeout("a down", model="m", llm_provider="p"))
-    client_b = _client_raising(litellm.RateLimitError("b down", model="m", llm_provider="p"))
+    client_a = _client_raising(fakes.Timeout("a down", model="m", llm_provider="p"))
+    client_b = _client_raising(fakes.RateLimitError("b down", model="m", llm_provider="p"))
 
     def fake_client(config: LLMConfig, *, cache_namespace: str | None = None) -> MagicMock:
         return client_a if config.model == "judge-a-model" else client_b
@@ -367,7 +367,7 @@ async def test_multi_choice_infrastructure_failure_is_na(mock_llm_config):
     )
     with patch(
         "autorubric.graders.criterion_grader.LLMClient",
-        return_value=_client_raising(litellm.Timeout("timed out", model="m", llm_provider="p")),
+        return_value=_client_raising(fakes.Timeout("timed out", model="m", llm_provider="p")),
     ):
         # Disable shuffling for deterministic behavior.
         grader = CriterionGrader(judge_model_config=mock_llm_config, shuffle_options=False)
@@ -483,7 +483,7 @@ async def test_ensemble_multi_choice_vote_carries_error():
         ]
     )
 
-    client_a = _client_raising(litellm.Timeout("a down", model="m", llm_provider="p"))
+    client_a = _client_raising(fakes.Timeout("a down", model="m", llm_provider="p"))
     client_b = MagicMock()
     client_b.generate = AsyncMock(return_value=_ok_mc_result(2))
 
@@ -539,8 +539,8 @@ async def test_ensemble_multi_choice_all_judges_fail_error_flagged():
         ]
     )
 
-    client_a = _client_raising(litellm.Timeout("a down", model="m", llm_provider="p"))
-    client_b = _client_raising(litellm.RateLimitError("b down", model="m", llm_provider="p"))
+    client_a = _client_raising(fakes.Timeout("a down", model="m", llm_provider="p"))
+    client_b = _client_raising(fakes.RateLimitError("b down", model="m", llm_provider="p"))
 
     def fake_client(config: LLMConfig, *, cache_namespace: str | None = None) -> MagicMock:
         return client_a if config.model == "judge-a-model" else client_b
@@ -603,8 +603,8 @@ async def test_ensemble_forced_choice_all_fail_clean_abstain():
         ]
     )
 
-    client_a = _client_raising(litellm.Timeout("a down", model="m", llm_provider="p"))
-    client_b = _client_raising(litellm.RateLimitError("b down", model="m", llm_provider="p"))
+    client_a = _client_raising(fakes.Timeout("a down", model="m", llm_provider="p"))
+    client_b = _client_raising(fakes.RateLimitError("b down", model="m", llm_provider="p"))
 
     def fake_client(config: LLMConfig, *, cache_namespace: str | None = None) -> MagicMock:
         return client_a if config.model == "judge-a-model" else client_b
@@ -653,8 +653,8 @@ async def test_error_survives_serialization_round_trip(mock_llm_config):
     """
     rubric = Rubric([Criterion(weight=1.0, requirement="Criterion A")])
 
-    client_a = _client_raising(litellm.Timeout("a down", model="m", llm_provider="p"))
-    client_b = _client_raising(litellm.RateLimitError("b down", model="m", llm_provider="p"))
+    client_a = _client_raising(fakes.Timeout("a down", model="m", llm_provider="p"))
+    client_b = _client_raising(fakes.RateLimitError("b down", model="m", llm_provider="p"))
 
     def fake_client(config: LLMConfig, *, cache_namespace: str | None = None) -> MagicMock:
         return client_a if config.model == "judge-a-model" else client_b
@@ -706,8 +706,8 @@ async def test_none_abstain_survives_serialization_round_trip():
         ]
     )
 
-    client_a = _client_raising(litellm.Timeout("a down", model="m", llm_provider="p"))
-    client_b = _client_raising(litellm.RateLimitError("b down", model="m", llm_provider="p"))
+    client_a = _client_raising(fakes.Timeout("a down", model="m", llm_provider="p"))
+    client_b = _client_raising(fakes.RateLimitError("b down", model="m", llm_provider="p"))
 
     def fake_client(config: LLMConfig, *, cache_namespace: str | None = None) -> MagicMock:
         return client_a if config.model == "judge-a-model" else client_b
@@ -1080,7 +1080,7 @@ STRATEGIES = {
     "zero": CannotAssessConfig(strategy=CannotAssessStrategy.ZERO),
 }
 FAILURES = {
-    "infrastructure": lambda: litellm.Timeout("timed out", model="m", llm_provider="p"),
+    "infrastructure": lambda: fakes.Timeout("timed out", model="m", llm_provider="p"),
     "parse": lambda: ValueError("bad json"),
     "unknown": lambda: RuntimeError("boom"),
 }

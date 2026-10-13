@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-import litellm
+import _fakes as fakes
 import typesafe_sdk
 from decision.conftest import FakeSDK, FakeSDKClient
 from typesafe_sdk import SystemOneResponse
@@ -390,7 +390,7 @@ def llm_scripts() -> dict[tuple[str, str], Any]:
     """
     return {
         (TERSE, SENTENCES.requirement): RuntimeError("LLM client crashed"),
-        (TERSE, TONE.requirement): litellm.RateLimitError(
+        (TERSE, TONE.requirement): fakes.RateLimitError(
             "rate limited", model="m", llm_provider="p"
         ),
     }

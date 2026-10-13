@@ -27,7 +27,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import litellm
+import _fakes as fakes
 import pytest
 import typesafe_sdk
 from typesafe_sdk import SystemOneResponse
@@ -959,7 +959,7 @@ class TestCascadeAggregation:
 
 
 def infrastructure() -> Exception:
-    return litellm.Timeout("timed out", model="m", llm_provider="p")
+    return fakes.Timeout("timed out", model="m", llm_provider="p")
 
 
 class TestEscalationJudgeFailures:

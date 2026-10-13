@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import anthropic
 import httpx
 import httpx2
-import openai
 import pytest
 import typesafe_sdk
 from typesafe_sdk import SystemOneResponse
@@ -297,7 +297,7 @@ class _LLMFailingItem2:
 
     async def generate(self, system_prompt: str, user_prompt: str, **kwargs: Any) -> Any:
         if "Answer 2:" in user_prompt:
-            raise openai.APIConnectionError(request=httpx.Request("POST", "https://llm.test"))
+            raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://llm.test"))
         parsed: Any
         if "<options>" in user_prompt:
             parsed = MultiChoiceJudgment(selected_option=2, explanation="mostly clear")

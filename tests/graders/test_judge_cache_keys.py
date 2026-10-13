@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from litellm import ModelResponse
+from _fakes import ModelResponse
 
 from autorubric import EnsembleEvaluationReport, LLMConfig, Rubric
 from autorubric.graders import CriterionGrader, JudgeSpec
@@ -53,7 +53,7 @@ async def test_rerun_of_repeated_judges_reads_each_judges_own_answer(tmp_path: P
     rubric = Rubric.from_dict([{"name": "c", "weight": 1.0, "requirement": "Is correct"}])
     config = _cached_config(tmp_path)
     runs = []
-    with patch("litellm.acompletion", side_effect=fake_acompletion):
+    with patch("autorubric.llm._acompletion", side_effect=fake_acompletion):
         for _ in range(2):
             calls.clear()
             grader = CriterionGrader(judges=[JudgeSpec(config, f"gpt-{i}") for i in range(3)])

@@ -38,8 +38,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import anthropic
 import httpx
-import openai
 import pytest
 
 from autorubric import LLMConfig, evaluate
@@ -869,7 +869,7 @@ async def _generate(
         if f"CRASH-{fruit.upper()}" in submission:
             raise RuntimeError("judge crashed")
         if f"DOWN-{fruit.upper()}" in submission:
-            raise openai.APIConnectionError(request=httpx.Request("POST", "https://llm.test"))
+            raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://llm.test"))
         verdict = MET if fruit in named else UNMET
         parsed = CriterionJudgment(criterion_status=verdict, explanation="looked")
     usage = TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2)
