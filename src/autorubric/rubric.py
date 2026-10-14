@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -188,6 +189,34 @@ class Rubric:
             query=query,
             reference_submission=reference_submission,
             guidelines=guidelines,
+        )
+
+    async def grade_group(
+        self,
+        submissions: Sequence[ToGradeInput],
+        grader: Grader[ReportT],
+        query: str | None = None,
+        reference_submission: str | None = None,
+        *,
+        shuffle_submissions: bool = True,
+    ) -> list[ReportT]:
+        """Grade several submissions to the same input against this rubric, each judge of
+        ``grader`` reading them all in one call (``CriterionGrader.grade_group``), with the
+        rubric's guidelines.
+
+        Raises:
+            TypeError: If ``grader`` cannot grade a group (it has no ``grade_group``).
+        """
+        grade_group = getattr(grader, "grade_group", None)
+        if grade_group is None:
+            raise TypeError(f"{type(grader).__name__} cannot grade a group of submissions")
+        return await grade_group(
+            submissions,
+            self.rubric,
+            query,
+            reference_submission,
+            guidelines=self.guidelines,
+            shuffle_submissions=shuffle_submissions,
         )
 
     @staticmethod

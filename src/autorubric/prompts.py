@@ -973,6 +973,149 @@ def _format_rubric_examples(
 
 
 # ============================================================================
+# Group Prompts (one LLM call for several submissions to one input)
+# ============================================================================
+# ``CriterionGrader.grade_group`` has each LLM judge grade every criterion of several
+# submissions to the same input in one call, so the judge reads them side by side and holds
+# them to one standard: judged one call each, the same judge can place two submissions that
+# meet a criterion equally well on different options. The prompts are the whole-rubric
+# prompts above with the submissions in place of the one submission: the same guides, the
+# criteria listed once under their ids, then each submission under its own id (``s1``,
+# ``s2``, ...), in the order the call shows them, and a response format with one entry per
+# submission holding one judgment per criterion.
+
+# ``{criterion_kinds}`` as in ``RUBRIC_JUDGMENT_PREAMBLE``.
+GROUP_JUDGMENT_PREAMBLE = """\
+You are an expert evaluation judge. Your task is to judge every criterion in the <criteria> list \
+against each of several submissions to the same input, in a single response. Be precise, \
+evidence-based, and consistent.
+
+Each criterion in <criteria> is a <rubric_criterion> with an id (c0, c1, ...). Each submission is \
+a <submission> with an id (s1, s2, ...).
+{criterion_kinds}
+
+Each guide is written for judging one criterion of one submission at a time. Apply it to each \
+criterion of its kind and each submission separately: judge every criterion independently, and \
+judge each submission on its own merits. Reading them side by side, hold every submission to the \
+same standard, so that submissions that meet a criterion equally get the same judgment of it; \
+submissions may deserve the same judgments. The <guidelines>, <input> and <reference_submission>, \
+when present, apply to every criterion and every submission.
+
+A guide's RESPONSE FORMAT and EXAMPLES show the fields of one criterion's judgment. Your response \
+holds one entry per submission, each with one judgment per criterion, as the RESPONSE FORMAT at \
+the end of these instructions says."""
+
+GROUP_JUDGMENT_RESPONSE_FORMAT = """\
+RESPONSE FORMAT:
+Respond with valid JSON holding exactly one entry per submission, in the order the submissions \
+are listed, each holding exactly one judgment per criterion, in the order the criteria are listed:
+{skeleton}
+
+- "submission_id" is the submission's id.
+- "criterion_id" is the criterion's id.
+{kind_rules}
+- "explanation" is the 1-2 sentence explanation the criterion's guide asks for, about that \
+submission.
+
+Return only raw JSON starting with {{, no back-ticks, no 'json' prefix."""
+
+
+def build_group_system_prompt(binary_guide: str | None, multi_choice_guide: str | None) -> str:
+    """Build the system prompt of an LLM judge's one call for several submissions.
+
+    ``GROUP_JUDGMENT_PREAMBLE``, then each guide given (binary first) wrapped in its tags,
+    then ``GROUP_JUDGMENT_RESPONSE_FORMAT``, one blank line apart; a guide, a kind line and a
+    rule only for a kind of criterion the call holds, as in ``build_rubric_system_prompt``.
+
+    Raises:
+        ValueError: If both guides are ``None``.
+    """
+    if binary_guide is None and multi_choice_guide is None:
+        raise ValueError("A group system prompt needs the guide of at least one kind of criterion")
+    kinds: list[str] = []
+    guides: list[str] = []
+    rules: list[str] = []
+    skeletons: list[dict[str, object]] = []
+    if binary_guide is not None:
+        kinds.append(RUBRIC_JUDGMENT_BINARY_KIND)
+        guides.append(RUBRIC_JUDGMENT_BINARY_GUIDE.format(guide=binary_guide))
+        rules.append(RUBRIC_JUDGMENT_BINARY_RULE)
+        skeletons.append(_RUBRIC_JUDGMENT_BINARY_SKELETON)
+    if multi_choice_guide is not None:
+        kinds.append(RUBRIC_JUDGMENT_MULTI_CHOICE_KIND)
+        guides.append(RUBRIC_JUDGMENT_MULTI_CHOICE_GUIDE.format(guide=multi_choice_guide))
+        rules.append(RUBRIC_JUDGMENT_MULTI_CHOICE_RULE)
+        skeletons.append(_RUBRIC_JUDGMENT_MULTI_CHOICE_SKELETON)
+    judgments = [{"criterion_id": f"c{i}", **judgment} for i, judgment in enumerate(skeletons)]
+    skeleton = json.dumps(
+        {
+            "submissions": [
+                {"submission_id": "s1", "judgments": judgments},
+                {"submission_id": "s2", "judgments": judgments},
+            ]
+        }
+    )
+    response_format = GROUP_JUDGMENT_RESPONSE_FORMAT.format(
+        skeleton=skeleton, kind_rules="\n".join(rules)
+    )
+    preamble = GROUP_JUDGMENT_PREAMBLE.format(criterion_kinds="\n".join(kinds))
+    return "\n\n".join([preamble, *guides, response_format])
+
+
+def build_group_user_prompt(
+    criteria: Sequence[tuple[str, Criterion]],
+    submissions: Sequence[tuple[str, str]],
+    query: str | None = None,
+    reference_submission: str | None = None,
+    *,
+    guidelines: str | None = None,
+) -> str:
+    """Build the user prompt of an LLM judge's one call for several submissions.
+
+    As ``build_rubric_user_prompt`` (the guidelines, the criteria, the input, the reference
+    submission), then each submission in a ``<submission>`` tagged with its id, in order.
+
+    Args:
+        criteria: Each criterion with its id, as the call shows it.
+        submissions: Each submission's id and text, in the order to show them.
+        query: Optional input/query that prompted the submissions.
+        reference_submission: Optional exemplar response for grading context.
+        guidelines: Optional rubric guidelines, as in ``build_user_prompt``.
+
+    Raises:
+        ValueError: If ``criteria`` or ``submissions`` is empty.
+    """
+    if not criteria:
+        raise ValueError("Cannot build a group prompt without criteria")
+    if not submissions:
+        raise ValueError("Cannot build a group prompt without submissions")
+    blocks = []
+    for criterion_id, criterion in criteria:
+        block = (
+            _multi_choice_criterion_block(criterion)
+            if criterion.is_multi_choice
+            else _binary_criterion_block(criterion)
+        )
+        blocks.append(f'<rubric_criterion id="{criterion_id}">\n{block}\n</rubric_criterion>')
+    criteria_text = "\n\n".join(blocks)
+    query_text = f"<input>{query}</input>\n\n" if query else ""
+    reference_text = (
+        f"<reference_submission>\n{reference_submission}\n</reference_submission>\n\n"
+        if reference_submission
+        else ""
+    )
+    submissions_text = "\n\n".join(
+        f'<submission id="{submission_id}">\n{text}\n</submission>'
+        for submission_id, text in submissions
+    )
+    return f"""{_guidelines_block(guidelines)}<criteria>
+{criteria_text}
+</criteria>
+
+{query_text}{reference_text}{submissions_text}"""
+
+
+# ============================================================================
 # Decision-Model Framing
 # ============================================================================
 # The fixed text a decision model receives around a binary criterion under the framed

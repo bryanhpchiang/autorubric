@@ -997,17 +997,94 @@ class RubricJudgment(BaseModel):
         """
         if not isinstance(data, dict) or not isinstance(data.get("judgments"), list):
             return handler(data)
-        usable: list[RubricCriterionJudgment] = []
-        unusable: list[tuple[str, str]] = []
-        for entry in data["judgments"]:
-            try:
-                usable.append(RubricCriterionJudgment.model_validate(entry))
-            except ValidationError as exc:
-                criterion_id = entry.get("criterion_id") if isinstance(entry, dict) else None
-                if isinstance(criterion_id, str):
-                    unusable.append((criterion_id, _validation_message(exc)))
+        usable, unusable = _split_judgments(data["judgments"])
         judgment = handler({**data, "judgments": usable})
         # ``frozen`` covers fields only, so the private attribute can be set.
+        judgment._unusable = unusable
+        return judgment
+
+
+def _split_judgments(
+    entries: list[Any],
+) -> tuple[list[RubricCriterionJudgment], list[tuple[str, str]]]:
+    """A one-call answer's judgment entries, each validated on its own: the valid ones, in
+    order, and ``(criterion_id, error)`` for each invalid one whose ``criterion_id`` is a
+    string (one without a readable id is dropped)."""
+    usable: list[RubricCriterionJudgment] = []
+    unusable: list[tuple[str, str]] = []
+    for entry in entries:
+        try:
+            usable.append(RubricCriterionJudgment.model_validate(entry))
+        except ValidationError as exc:
+            criterion_id = entry.get("criterion_id") if isinstance(entry, dict) else None
+            if isinstance(criterion_id, str):
+                unusable.append((criterion_id, _validation_message(exc)))
+    return usable, unusable
+
+
+# The answer of an LLM judge that grades several submissions to one input in one call
+# (``CriterionGrader.grade_group``): for each submission, under the id the call shows it with
+# (``s1``, ``s2``, ...), one judgment per criterion as in ``RubricJudgment``. As there, one
+# unusable judgment fails only its criterion of its submission: a submission's entries are
+# validated one by one, and a submission entry without a usable ``judgments`` list is
+# recorded in ``_unusable`` under its id, when it has one, so that its submission alone fails.
+
+
+class GroupSubmissionJudgment(BaseModel):
+    """One submission's judgments in an LLM judge's answer about several submissions."""
+
+    model_config = ConfigDict(frozen=True)
+
+    submission_id: str = Field(description="The submission's id, e.g. s1")
+    judgments: list[RubricCriterionJudgment] = Field(description="One judgment per criterion")
+    # The unusable entries, as (criterion_id, error), as in ``RubricJudgment``.
+    _unusable: list[tuple[str, str]] = PrivateAttr(default_factory=list)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _keep_usable_entries(cls, data: Any, handler: ModelWrapValidatorHandler[Self]) -> Self:
+        """Validate each entry of ``judgments`` on its own (``RubricJudgment``'s rule)."""
+        if not isinstance(data, dict) or not isinstance(data.get("judgments"), list):
+            return handler(data)
+        usable, unusable = _split_judgments(data["judgments"])
+        judgment = handler({**data, "judgments": usable})
+        judgment._unusable = unusable
+        return judgment
+
+
+class GroupJudgment(BaseModel):
+    """An LLM judge's answer for every criterion of several submissions, in one call."""
+
+    model_config = ConfigDict(frozen=True)
+
+    submissions: list[GroupSubmissionJudgment] = Field(
+        description="One entry per submission, each with one judgment per criterion"
+    )
+    reasoning: str | None = Field(
+        default=None,
+        description=(
+            "Extended thinking/reasoning trace from the LLM (populated when thinking is enabled)"
+        ),
+    )
+    # The unusable submission entries, as (submission_id, error).
+    _unusable: list[tuple[str, str]] = PrivateAttr(default_factory=list)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _keep_usable_submissions(cls, data: Any, handler: ModelWrapValidatorHandler[Self]) -> Self:
+        """Validate each entry of ``submissions`` on its own, so one cannot fail the answer."""
+        if not isinstance(data, dict) or not isinstance(data.get("submissions"), list):
+            return handler(data)
+        usable: list[GroupSubmissionJudgment] = []
+        unusable: list[tuple[str, str]] = []
+        for entry in data["submissions"]:
+            try:
+                usable.append(GroupSubmissionJudgment.model_validate(entry))
+            except ValidationError as exc:
+                submission_id = entry.get("submission_id") if isinstance(entry, dict) else None
+                if isinstance(submission_id, str):
+                    unusable.append((submission_id, _validation_message(exc)))
+        judgment = handler({**data, "submissions": usable})
         judgment._unusable = unusable
         return judgment
 

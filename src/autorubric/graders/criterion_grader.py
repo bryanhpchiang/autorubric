@@ -30,7 +30,7 @@ from autorubric.decision import (
     build_state,
     question_id,
 )
-from autorubric.graders.base import Grader, _caller_stacklevel
+from autorubric.graders.base import Grader, _caller_stacklevel, _to_grade_text
 from autorubric.llm import GenerateResult, LLMClient, LLMConfig, classify_grading_error
 from autorubric.prompts import (
     FEW_SHOT_SYSTEM_PROMPT_ADDITION,
@@ -39,6 +39,8 @@ from autorubric.prompts import (
     MULTI_CHOICE_SYSTEM_PROMPT,
     _format_rubric_examples,
     build_few_shot_user_prompt,
+    build_group_system_prompt,
+    build_group_user_prompt,
     build_multi_choice_few_shot_user_prompt,
     build_multi_choice_user_prompt,
     build_rubric_system_prompt,
@@ -58,6 +60,8 @@ from autorubric.types import (
     EnsembleEvaluationReport,
     FewShotConfig,
     FewShotExample,
+    GroupJudgment,
+    GroupSubmissionJudgment,
     JudgeVote,
     LengthPenalty,
     LLMCalls,
@@ -68,6 +72,7 @@ from autorubric.types import (
     OrdinalAggregation,
     RubricCriterionJudgment,
     RubricJudgment,
+    ToGradeInput,
     TokenUsage,
     _binary_worst_verdict,
 )
@@ -102,6 +107,10 @@ def _derive_shuffle_rng(
 # ``llm_calls="per_item"`` it draws whole training items once, with ``-1`` in the criterion
 # slot for the whole rubric.
 FEW_SHOT_DOMAIN = "few_shot"
+
+# The criterion slot of ``_derive_shuffle_rng`` for the order a judge sees a group's
+# submissions in (``grade_group``): not a criterion index, and not the few-shot draw's -1.
+_GROUP_ORDER_IDX = -2
 
 # The judge_id a grader built with ``judge_model_config`` gives its one judge. That judge's
 # LLM client keeps the plain response-cache key; every other LLM judge caches under its
@@ -2575,7 +2584,7 @@ class CriterionGrader(Grader[EnsembleEvaluationReport]):
         criterion: Criterion,
         criterion_idx: int,
         answers: Sequence[RubricCriterionJudgment | str],
-        reply: RubricJudgment,
+        reply: RubricJudgment | GroupJudgment,
         shuffled_indices: list[int] | None,
     ) -> CriterionReport:
         """A criterion's report from the judgments a one-call reply has for its id.
@@ -2626,6 +2635,231 @@ class CriterionGrader(Grader[EnsembleEvaluationReport]):
             )
         reason = _require_llm_reason(_inject_affected_criteria(answer.explanation, answer))
         return self._binary_report(criterion, answer.criterion_status, reason, reply.reasoning)
+
+    # =========================================================================
+    # Several submissions to one input in one call
+    # =========================================================================
+
+    async def grade_group(
+        self,
+        submissions: Sequence[ToGradeInput],
+        rubric: list[Criterion],
+        query: str | None = None,
+        reference_submission: str | None = None,
+        *,
+        guidelines: str | None = None,
+        shuffle_submissions: bool = True,
+    ) -> list[EnsembleEvaluationReport]:
+        """Grade several submissions to the same input, each LLM judge in one call for all.
+
+        Judged one call each, a judge places each submission on the rubric's scale without
+        seeing the others, and the same judge can put two submissions that meet a criterion
+        equally well on different options, or two that differ on the same one. Here each judge
+        reads them side by side: one call per judge lists the criteria once, then every
+        submission under its own id (``s1``, ``s2``, ...), and answers every criterion for
+        every submission (``GroupJudgment``). This is the setting of a training group (several
+        samples for one prompt) and of an eval with several samples per prompt; one submission
+        is a group of one.
+
+        Each judge sees the submissions in its own order, shuffled (unless
+        ``shuffle_submissions`` is False) by ``_derive_shuffle_rng`` keyed on the grader's seed,
+        the group's content and the judge, so an ensemble's judges do not all read them in one
+        order. Under ``shuffle_options`` a multi-choice criterion's options are permuted once per
+        call, keyed on the group's content, the criterion and the judge, so every submission is
+        judged on the same order. Each submission's report is aggregated across judges as
+        ``grade`` aggregates one submission's, with the grader's length penalty applied.
+
+        Failures are scoped as in a whole-rubric call (``llm_calls="per_item"``): a failed call
+        fails every criterion of every submission for that judge; a submission the reply has no
+        usable entry for (or more than one) fails all its criteria; a criterion fails alone for
+        its submission when its judgment is missing, duplicated or unusable. The call's usage and
+        cost ride on the first submission's first criterion, so summing over the reports counts
+        each call once.
+
+        Args:
+            submissions: The submissions, as ``grade`` takes one (a string, or a dict with
+                ``thinking`` and ``output``).
+            rubric: The criteria.
+            query: The input that prompted every submission.
+            reference_submission: An exemplar response for grading context.
+            guidelines: The rubric's guidelines (``Rubric.grade_group`` passes them).
+            shuffle_submissions: Whether each judge sees the submissions in its own shuffled
+                order (the default) rather than in the order given.
+
+        Returns:
+            One report per submission, in the order given; empty for no submissions.
+
+        Raises:
+            ValueError: If a judge is a decision model, the grader is a cascade, or it has
+                training data (few-shot examples are not shown in a group call).
+        """
+        if self._decision_clients or self._escalation is not None:
+            raise ValueError("grade_group needs LLM judges only: no decision model and no cascade")
+        if self._training_data is not None:
+            raise ValueError("grade_group does not show few-shot examples: remove training_data")
+        guidelines = _normalize_guidelines(guidelines)
+        if not submissions:
+            return []
+        texts = [_to_grade_text(s) for s in submissions]
+        effective_rubric = [self._effective_criterion(c) for c in rubric]
+        group_key = hashlib.sha256("\x00".join(sorted(texts)).encode()).hexdigest()[:16]
+        per_judge = await asyncio.gather(
+            *(
+                self._judge_group_in_one_call(
+                    judge,
+                    effective_rubric,
+                    texts,
+                    group_key,
+                    query,
+                    reference_submission,
+                    guidelines=guidelines,
+                    shuffle_submissions=shuffle_submissions,
+                )
+                for judge in self._judges
+            )
+        )
+        reports = []
+        for i, submission in enumerate(submissions):
+            judge_results = [
+                JudgeCriterionResults(
+                    judge_id=judge.judge_id, weight=judge.weight, criterion_results=results[i]
+                )
+                for judge, results in zip(self._judges, per_judge, strict=True)
+            ]
+            report = await self.aggregate(judge_results, normalize=self.normalize)
+            reports.append(self._apply_length_penalty(report, submission))
+        return reports
+
+    async def _judge_group_in_one_call(
+        self,
+        judge: JudgeSpec,
+        rubric: list[Criterion],
+        texts: list[str],
+        group_key: str,
+        query: str | None = None,
+        reference_submission: str | None = None,
+        *,
+        guidelines: str | None = None,
+        shuffle_submissions: bool = True,
+    ) -> list[list[CriterionResult]]:
+        """One LLM judge's results for every criterion of every submission, from one call.
+
+        Returns one list of ``CriterionResult`` per submission of ``texts``, in that order and
+        in rubric order; the call's usage and cost on the first submission's first result. No
+        call is made for an empty rubric.
+        """
+        if not rubric:
+            return [[] for _ in texts]
+        client = self._clients[judge.judge_id]
+        presented: list[tuple[str, Criterion]] = []
+        shuffles: list[list[int] | None] = []
+        for criterion_idx, criterion in enumerate(rubric):
+            shown: Criterion = criterion
+            shuffled_indices: list[int] | None = None
+            if criterion.is_multi_choice:
+                shown, shuffled_indices = self._presented_criterion(
+                    criterion, criterion_idx, judge.judge_id, group_key
+                )
+            presented.append((question_id(criterion_idx), shown))
+            shuffles.append(shuffled_indices)
+        order = list(range(len(texts)))  # order[shown position] = index in texts
+        if shuffle_submissions:
+            _derive_shuffle_rng(self._seed, group_key, _GROUP_ORDER_IDX, judge.judge_id).shuffle(
+                order
+            )
+        shown_ids = {i: f"s{pos + 1}" for pos, i in enumerate(order)}
+        system_prompt = build_group_system_prompt(
+            self._system_prompt if any(c.is_binary for c in rubric) else None,
+            self._multi_choice_system_prompt if any(c.is_multi_choice for c in rubric) else None,
+        )
+        user_prompt = build_group_user_prompt(
+            presented,
+            [(shown_ids[i], texts[i]) for i in order],
+            query,
+            reference_submission,
+            guidelines=guidelines,
+        )
+
+        def failed_all(error: BaseException) -> list[CriterionResult]:
+            return [
+                _failed_judgment_result(
+                    criterion,
+                    judge.judge_id,
+                    error,
+                    shuffle_order=shuffled_indices if self._shuffle_options else None,
+                )
+                for criterion, shuffled_indices in zip(rubric, shuffles, strict=True)
+            ]
+
+        try:
+            result = cast(
+                GenerateResult,
+                await client.generate(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    response_format=GroupJudgment,
+                    return_result=True,
+                ),
+            )
+            reply: GroupJudgment = result.parsed
+        except Exception as e:
+            return [failed_all(e) for _ in texts]
+
+        entries: dict[str, list[GroupSubmissionJudgment | str]] = {}
+        for entry in reply.submissions:
+            entries.setdefault(entry.submission_id.strip(), []).append(entry)
+        for submission_id, error in reply._unusable:
+            entries.setdefault(submission_id.strip(), []).append(error)
+        out: list[list[CriterionResult]] = []
+        for i in range(len(texts)):
+            got = entries.get(shown_ids[i], [])
+            if len(got) != 1 or isinstance(got[0], str):
+                why = (
+                    "the reply has no entry with its id"
+                    if not got
+                    else f"the reply has {len(got)} entries with its id"
+                    if len(got) > 1
+                    else got[0]
+                )
+                out.append(
+                    failed_all(
+                        ValueError(f"no usable judgments for submission {shown_ids[i]}: {why}")
+                    )
+                )
+                continue
+            (submission,) = got
+            answers: dict[str, list[RubricCriterionJudgment | str]] = {}
+            for judgment in submission.judgments:
+                answers.setdefault(judgment.criterion_id, []).append(judgment)
+            for criterion_id, error in submission._unusable:
+                answers.setdefault(criterion_id, []).append(error)
+            results: list[CriterionResult] = []
+            for criterion_idx, (criterion, shuffled_indices) in enumerate(
+                zip(rubric, shuffles, strict=True)
+            ):
+                try:
+                    report = self._rubric_judgment_report(
+                        criterion,
+                        criterion_idx,
+                        answers.get(question_id(criterion_idx), []),
+                        reply,
+                        shuffled_indices,
+                    )
+                except Exception as e:
+                    results.append(
+                        _failed_judgment_result(
+                            criterion,
+                            judge.judge_id,
+                            e,
+                            shuffle_order=shuffled_indices if self._shuffle_options else None,
+                        )
+                    )
+                else:
+                    results.append(CriterionResult(report=report))
+            out.append(results)
+        if out and out[0]:
+            out[0][0] = dataclasses.replace(out[0][0], usage=result.usage, cost=result.cost)
+        return out
 
     # =========================================================================
     # Judge and Aggregate (Grader Interface)

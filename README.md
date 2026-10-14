@@ -193,6 +193,7 @@ When writing or editing code that uses AutoRubric:
 | Ensemble judging           | Combine multiple judges, LLMs and decision models alike, with configurable aggregation strategies |
 | Decision-model judges      | One request per item with TypeSafe's Jev or a compatible model, alone or as a cheap first pass with an LLM fallback (`pip install 'autorubric[typesafe]'`) |
 | Single-call grading        | Grade an item's whole rubric in one LLM call instead of one per criterion (`llm_calls="per_item"`), for lower cost and decision-model parity |
+| Group grading              | Grade several submissions to one input in one call per judge (`Rubric.grade_group`), so the judge holds them to one standard |
 | Few-shot calibration       | Provide labeled examples to LLM judges to improve grading consistency    |
 | Multi-choice criteria      | Ordinal and nominal scales beyond binary met/unmet verdicts              |
 | Batch evaluation           | High-throughput `EvalRunner` with checkpointing and resumption           |

@@ -256,6 +256,25 @@ The upstream `rubric` library, from which AutoRubric was forked, shipped a mode 
 
 `llm_calls` counts LLM calls per item. It is unrelated to `compute_metrics(per_item_metrics=...)`, a metrics-computation setting, and to per-item rubrics, where each dataset item carries its own `Rubric`.
 
+## Grading several submissions together
+
+Judged one call at a time, a judge places each submission on the rubric's scale without seeing the others, so it can put two submissions that meet a criterion equally well on different options, or two that differ on the same one. When you have several submissions to the same input (a group of samples for one prompt in RL training, or an eval with several samples per prompt) and what matters is how they rank, `grade_group` has each LLM judge read them side by side: one call per judge lists the criteria once, then every submission under its own id (`s1`, `s2`, ...), and answers every criterion for every submission.
+
+```python
+reports = await rubric.grade_group(
+    [sample_a, sample_b, sample_c, sample_d],
+    grader=CriterionGrader(judges=[JudgeSpec(cfg, "a"), JudgeSpec(cfg, "b")]),
+    query=prompt,
+)
+# one EnsembleEvaluationReport per submission, in the order given
+```
+
+- **Order.** Each judge sees the submissions in its own shuffled order (seeded by the grader's seed, the group and the judge), so an ensemble's judges do not all read them in one order; `shuffle_submissions=False` keeps the order given. With `shuffle_options`, a criterion's options are shuffled once per call, so every submission is judged on the same order.
+- **Failures** are scoped as in a whole-rubric call: a failed call fails every criterion of every submission for that judge, a submission missing from the reply fails all its criteria, and an unusable judgment fails only its criterion of its submission.
+- **Usage** rides on the first submission's first criterion, so summing over the reports counts each call once.
+- **`max_tokens`** must cover every criterion of every submission: the call writes an explanation for each.
+- LLM judges only: a decision model, a cascade or training data (few-shot examples) is refused. A group of one is allowed.
+
 ## Choosing a judge kind
 
 | | LLM judge | Decision model |

@@ -77,6 +77,22 @@ def _accepts_guidelines(target: Callable[..., Any], *, through_kwargs: bool = Tr
     )
 
 
+def _to_grade_text(to_grade: ToGradeInput) -> str:
+    """A submission as a judge receives it: a string as it is; a dict with ``thinking`` and
+    ``output`` keys as the string with those markers (``<thinking>...</thinking>``, then
+    ``<output>...</output>``, each only when not empty)."""
+    if isinstance(to_grade, str):
+        return to_grade
+    thinking = to_grade.get("thinking", "")
+    output = to_grade.get("output", "")
+    parts = []
+    if thinking:
+        parts.append(f"<thinking>{thinking}</thinking>")
+    if output:
+        parts.append(f"<output>{output}</output>")
+    return "\n".join(parts) if parts else ""
+
+
 def _instance_dict(grader: object) -> dict[str, Any] | None:
     """The grader's own writable attribute dict, or ``None`` when it has none."""
     instance_dict = getattr(grader, "__dict__", None)
@@ -249,18 +265,7 @@ class Grader(ABC, Generic[ReportT]):
             guidelines = None
 
         # Convert to_grade to string for judge() call (maintains compatibility)
-        if isinstance(to_grade, str):
-            to_grade_str = to_grade
-        else:
-            # Dict format - reconstruct string with markers for judge()
-            thinking = to_grade.get("thinking", "")
-            output = to_grade.get("output", "")
-            parts = []
-            if thinking:
-                parts.append(f"<thinking>{thinking}</thinking>")
-            if output:
-                parts.append(f"<output>{output}</output>")
-            to_grade_str = "\n".join(parts) if parts else ""
+        to_grade_str = _to_grade_text(to_grade)
 
         # Call judge with string format (maintains compatibility). Guidelines go as a
         # keyword, and only to a judge that accepts it (checked above); the abstract
@@ -273,7 +278,11 @@ class Grader(ABC, Generic[ReportT]):
                 to_grade_str, rubric, query, reference_submission, guidelines=guidelines
             )
         report = await self.aggregate(judge_results, normalize=self.normalize)
+        return self._apply_length_penalty(report, to_grade)
 
+    def _apply_length_penalty(self, report: ReportT, to_grade: ToGradeInput) -> ReportT:
+        """``report`` with the grader's length penalty for ``to_grade`` taken off its score,
+        when the grader has one (see ``grade``); otherwise ``report`` itself."""
         if self.length_penalty is not None:
             # A grade-FAILURE has no score (errored/empty report): there is nothing to
             # penalize, so return it unchanged rather than subtracting from None.
