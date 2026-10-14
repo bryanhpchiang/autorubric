@@ -520,7 +520,9 @@ class LLMConfig:
         cache_enabled: Default caching behavior (can be overridden per-request).
         cache_dir: Directory for response cache.
         cache_ttl: Cache time-to-live in seconds (None = no expiration).
-        api_key: Optional API key override (otherwise uses environment variables).
+        api_key: Optional credential override (otherwise read from the environment): the API
+            key under auth "api_key", the subscription's OAuth token under auth "oauth" (so
+            judges in one process can run on different subscriptions).
         api_base: Optional API base URL override.
         thinking: Enable thinking/reasoning mode (unified across providers). Accepts
             multiple formats:
@@ -764,7 +766,7 @@ def _anthropic_client(
 
     if auth == "oauth":
         client = anthropic.AsyncAnthropic(
-            auth_token=oauth_token(),
+            auth_token=api_key or oauth_token(),
             base_url=api_base,
             timeout=timeout,
             max_retries=0,

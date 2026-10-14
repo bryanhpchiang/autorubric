@@ -130,6 +130,13 @@ class TestAuth:
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-other")
         assert _anthropic_client("oauth", None, None, 30.0).auth_token == "sk-ant-oat-work"
 
+    def test_a_configured_token_wins_under_oauth(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_ACCOUNT", "work")
+        monkeypatch.setenv("CLAUDE_TOKEN_WORK", "sk-ant-oat-work")
+        client = _anthropic_client("oauth", "sk-ant-oat-rubrics", None, 30.0)
+        assert client.auth_token == "sk-ant-oat-rubrics"
+        assert client.api_key is None
+
     def test_api_key_mode(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-key")
         client = _anthropic_client("api_key", None, None, 30.0)
