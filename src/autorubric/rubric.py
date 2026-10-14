@@ -199,6 +199,7 @@ class Rubric:
         reference_submission: str | None = None,
         *,
         shuffle_submissions: bool = True,
+        explanations: bool = True,
     ) -> list[ReportT]:
         """Grade several submissions to the same input against this rubric, each judge of
         ``grader`` reading them all in one call (``CriterionGrader.grade_group``), with the
@@ -217,6 +218,7 @@ class Rubric:
             reference_submission,
             guidelines=self.guidelines,
             shuffle_submissions=shuffle_submissions,
+            explanations=explanations,
         )
 
     @staticmethod

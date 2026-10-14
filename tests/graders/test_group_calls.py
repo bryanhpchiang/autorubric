@@ -224,6 +224,19 @@ class TestGroupCalls:
         await Rubric(BINARY).grade_group([{"thinking": "hmm", "output": "light"}], grader)
         assert "<thinking>hmm</thinking>\n<output>light</output>" in fakes["a"].calls[0].user_prompt
 
+    @pytest.mark.asyncio
+    async def test_without_explanations_the_format_asks_for_none_and_reports_carry_empty_reasons(
+        self,
+    ):
+        grader, fakes = panel("a")
+        reports = await Rubric(MIXED).grade_group(SUBMISSIONS, grader, explanations=False)
+        system = fakes["a"].calls[0].system_prompt
+        assert system == build_group_system_prompt(
+            grader._system_prompt, grader._multi_choice_system_prompt, explanations=False
+        )
+        assert 'is always the empty string ""' in system and '"explanation": ""' in system
+        assert all(r.error is None for r in reports)
+
 
 class TestGroupFailures:
     @pytest.mark.asyncio

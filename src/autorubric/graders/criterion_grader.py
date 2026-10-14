@@ -2649,6 +2649,7 @@ class CriterionGrader(Grader[EnsembleEvaluationReport]):
         *,
         guidelines: str | None = None,
         shuffle_submissions: bool = True,
+        explanations: bool = True,
     ) -> list[EnsembleEvaluationReport]:
         """Grade several submissions to the same input, each LLM judge in one call for all.
 
@@ -2685,6 +2686,9 @@ class CriterionGrader(Grader[EnsembleEvaluationReport]):
             guidelines: The rubric's guidelines (``Rubric.grade_group`` passes them).
             shuffle_submissions: Whether each judge sees the submissions in its own shuffled
                 order (the default) rather than in the order given.
+            explanations: Whether the judge explains each judgment (the default). False asks
+                for every explanation to be left empty, so the call writes only the choices: a
+                fraction of the output, when only the scores are needed (an RL reward).
 
         Returns:
             One report per submission, in the order given; empty for no submissions.
@@ -2714,6 +2718,7 @@ class CriterionGrader(Grader[EnsembleEvaluationReport]):
                     reference_submission,
                     guidelines=guidelines,
                     shuffle_submissions=shuffle_submissions,
+                    explanations=explanations,
                 )
                 for judge in self._judges
             )
@@ -2741,6 +2746,7 @@ class CriterionGrader(Grader[EnsembleEvaluationReport]):
         *,
         guidelines: str | None = None,
         shuffle_submissions: bool = True,
+        explanations: bool = True,
     ) -> list[list[CriterionResult]]:
         """One LLM judge's results for every criterion of every submission, from one call.
 
@@ -2771,6 +2777,7 @@ class CriterionGrader(Grader[EnsembleEvaluationReport]):
         system_prompt = build_group_system_prompt(
             self._system_prompt if any(c.is_binary for c in rubric) else None,
             self._multi_choice_system_prompt if any(c.is_multi_choice for c in rubric) else None,
+            explanations=explanations,
         )
         user_prompt = build_group_user_prompt(
             presented,

@@ -1014,18 +1014,32 @@ are listed, each holding exactly one judgment per criterion, in the order the cr
 - "submission_id" is the submission's id.
 - "criterion_id" is the criterion's id.
 {kind_rules}
-- "explanation" is the 1-2 sentence explanation the criterion's guide asks for, about that \
-submission.
+{explanation_rule}
 
 Return only raw JSON starting with {{, no back-ticks, no 'json' prefix."""
 
+GROUP_JUDGMENT_EXPLANATION_RULE = (
+    '- "explanation" is the 1-2 sentence explanation the criterion\'s guide asks for, about that '
+    "submission."
+)
+# With ``explanations=False`` the judge leaves every explanation empty: a group call writes one
+# per criterion per submission, which is most of its output, and a training reward needs only
+# the choices.
+GROUP_JUDGMENT_NO_EXPLANATION_RULE = (
+    '- "explanation" is always the empty string "": give no explanations in this response, '
+    "whatever a guide asks."
+)
 
-def build_group_system_prompt(binary_guide: str | None, multi_choice_guide: str | None) -> str:
+
+def build_group_system_prompt(
+    binary_guide: str | None, multi_choice_guide: str | None, *, explanations: bool = True
+) -> str:
     """Build the system prompt of an LLM judge's one call for several submissions.
 
     ``GROUP_JUDGMENT_PREAMBLE``, then each guide given (binary first) wrapped in its tags,
     then ``GROUP_JUDGMENT_RESPONSE_FORMAT``, one blank line apart; a guide, a kind line and a
     rule only for a kind of criterion the call holds, as in ``build_rubric_system_prompt``.
+    With ``explanations`` False the format asks for every explanation to be left empty.
 
     Raises:
         ValueError: If both guides are ``None``.
@@ -1046,7 +1060,10 @@ def build_group_system_prompt(binary_guide: str | None, multi_choice_guide: str 
         guides.append(RUBRIC_JUDGMENT_MULTI_CHOICE_GUIDE.format(guide=multi_choice_guide))
         rules.append(RUBRIC_JUDGMENT_MULTI_CHOICE_RULE)
         skeletons.append(_RUBRIC_JUDGMENT_MULTI_CHOICE_SKELETON)
-    judgments = [{"criterion_id": f"c{i}", **judgment} for i, judgment in enumerate(skeletons)]
+    judgments = [
+        {"criterion_id": f"c{i}", **judgment, **({} if explanations else {"explanation": ""})}
+        for i, judgment in enumerate(skeletons)
+    ]
     skeleton = json.dumps(
         {
             "submissions": [
@@ -1056,7 +1073,11 @@ def build_group_system_prompt(binary_guide: str | None, multi_choice_guide: str 
         }
     )
     response_format = GROUP_JUDGMENT_RESPONSE_FORMAT.format(
-        skeleton=skeleton, kind_rules="\n".join(rules)
+        skeleton=skeleton,
+        kind_rules="\n".join(rules),
+        explanation_rule=GROUP_JUDGMENT_EXPLANATION_RULE
+        if explanations
+        else GROUP_JUDGMENT_NO_EXPLANATION_RULE,
     )
     preamble = GROUP_JUDGMENT_PREAMBLE.format(criterion_kinds="\n".join(kinds))
     return "\n\n".join([preamble, *guides, response_format])

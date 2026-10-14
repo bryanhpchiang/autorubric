@@ -272,7 +272,7 @@ reports = await rubric.grade_group(
 - **Order.** Each judge sees the submissions in its own shuffled order (seeded by the grader's seed, the group and the judge), so an ensemble's judges do not all read them in one order; `shuffle_submissions=False` keeps the order given. With `shuffle_options`, a criterion's options are shuffled once per call, so every submission is judged on the same order.
 - **Failures** are scoped as in a whole-rubric call: a failed call fails every criterion of every submission for that judge, a submission missing from the reply fails all its criteria, and an unusable judgment fails only its criterion of its submission.
 - **Usage** rides on the first submission's first criterion, so summing over the reports counts each call once.
-- **`max_tokens`** must cover every criterion of every submission: the call writes an explanation for each.
+- **`max_tokens`** must cover every criterion of every submission: the call writes an explanation for each. `explanations=False` asks for every explanation to be left empty, so the call writes only the choices (reports then carry empty reasons): much less output when only the scores are needed, as for an RL reward.
 - LLM judges only: a decision model, a cascade or training data (few-shot examples) is refused. A group of one is allowed.
 
 ## Choosing a judge kind
